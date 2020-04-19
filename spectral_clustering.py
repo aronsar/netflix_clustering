@@ -40,7 +40,8 @@ TRAIN_VAL_SPLIT = .9 # fraction of movies in train data for each user
 NUM_USERS = 5905 # counted
 NUM_MOVIES = 17770 # gotten from movie_titles.txt
 NUM_EIGS = 30 # number of eigenvectors to compute
-
+FOUND_COUNT = 0
+NOTFOUND_COUNT = 0
 def sim_func(user_rating_vec1, user_rating_vec2):
     common_movies_idx = np.nonzero(user_rating_vec1 * user_rating_vec2)[0]
     #either_movies_idx = np.nonzero(user_rating_vec1 + user_rating_vec2)[0]
@@ -91,7 +92,7 @@ def unnormalized_spectral_clustering(ratings, args):
     # create unnormalized Laplacian
     unnormalized_laplacian = degree_matrix - similarity_graph
     assert(np.all(unnormalized_laplacian - unnormalized_laplacian.T == 0))
-    np.linalg.cholesky(unnormalized_laplacian) # test for positive semidefiniteness
+    np.linalg.cholesky(unnormalized_laplacian + np.eye(args.users_to_use)*.01) # test for positive semidefiniteness
 
     # find smallest NUM_EIGS eigenvalues of the unnormalized laplacian
     #eigenvalues, eigenvectors = scipy.sparse.linalg.eigs(unnormalized_laplacian, k=NUM_EIGS, which='SM')
@@ -99,7 +100,6 @@ def unnormalized_spectral_clustering(ratings, args):
     smallest_idx = np.argsort(eigenvalues)[:NUM_EIGS]
     eigenvalues = eigenvalues[smallest_idx]
     eigenvectors = eigenvectors[:, smallest_idx]
-    print(eigenvalues)
 
     # create U, the matrix containing the eigenvectors as columns
     U = np.array(eigenvectors[:, 1:args.num_clusters+1])
@@ -120,20 +120,23 @@ def create_train_cluster2users_dict(train_clusters):
 def predict_ratings(train_clusters, train_ratings_mat, val_users):
     # set the predicted rating of a user for a particular movie to the average rating of 
     # the cluster of users that the user belongs to
+    global FOUND_COUNT, NOTFOUND_COUNT
     pred_val_ratings = defaultdict(list)
     train_cluster2users_dict = create_train_cluster2users_dict(train_clusters)
 
     for user in range(args.users_to_use):
         movie_id_arr = np.array(val_users[user])[:,1]
         for movie_id in movie_id_arr:
-            peer_arr = train_cluster2users_dict[user] # a peer is another in-cluster user
+            peer_arr = train_cluster2users_dict[train_clusters[user]] # a peer is another in-cluster user
             peer_ratings = train_ratings_mat[movie_id, peer_arr]
             peer_ratings = peer_ratings[np.nonzero(peer_ratings)]
             if peer_ratings.size == 0:
                 avg_peer_rating = 3 # FIXME: set this to the averge rating for that movie
+                NOTFOUND_COUNT += 1
             else:
                 avg_peer_rating = np.sum(peer_ratings) / len(peer_ratings)
-            pred_val_ratings[user].append(avg_peer_rating)
+                FOUND_COUNT += 1
+            pred_val_ratings[user].append(int(avg_peer_rating + .5))
 
     return pred_val_ratings
 
@@ -154,7 +157,7 @@ def loss_func(pred_ratings, gt_ratings):
 
 
 def train_val_split(all_users, all_ratings):
-    #FIXME: might make sense to use only 1 or 2 movies at random from each user
+    # training and validation data are split randomly
     train_users = {}
     val_users = {}
     train_ratings_mat = np.zeros(all_ratings.shape)
@@ -243,4 +246,5 @@ if __name__ == '__main__':
     pred_val_ratings = predict_ratings(train_clusters, train_ratings_mat, val_users)
     loss, avg_error = loss_func(pred_val_ratings, gt_ratings(val_users))
     print("Loss is {:.1f}, and avg error is {:.2f}".format(loss, avg_error))
+    print(FOUND_COUNT, NOTFOUND_COUNT)
     pass
