@@ -15,6 +15,12 @@ parser.add_argument(
     action='store_true',
     help='Recalculate the similarity matrix from scratch') 
 parser.add_argument(
+    '-m',
+    '--sim_mat_num', 
+    type=int,
+    default=0,
+    help='Recalculate the similarity matrix from scratch') 
+parser.add_argument(
     '-n',
     '--k_neb', 
     type=int,
@@ -32,16 +38,23 @@ parser.add_argument(
     type=int,
     default=300,
     help='The number of users to use; fewer is faster; 5905 is maximum and takes >1 hr.') 
+parser.add_argument(
+    '-i',
+    '--i_factor', 
+    type=float,
+    default=0.05,
+    help='The importance of having many movies in common vs ranking them similarly.') 
 args = parser.parse_args()
 assert(args.users_to_use <= 5905)
 
 
-TRAIN_VAL_SPLIT = .9 # fraction of movies in train data for each user
+TRAIN_VAL_SPLIT = 1 # fraction of movies in train data for each user
 NUM_USERS = 5905 # counted
 NUM_MOVIES = 17770 # gotten from movie_titles.txt
 NUM_EIGS = 30 # number of eigenvectors to compute
 FOUND_COUNT = 0
 NOTFOUND_COUNT = 0
+
 def sim_func(user_rating_vec1, user_rating_vec2):
     common_movies_idx = np.nonzero(user_rating_vec1 * user_rating_vec2)[0]
     #either_movies_idx = np.nonzero(user_rating_vec1 + user_rating_vec2)[0]
@@ -53,7 +66,7 @@ def sim_func(user_rating_vec1, user_rating_vec2):
     op2 = np.square(op1)
     op3 = np.sum(op2)
     op4 = op3 / (16 * len(common_movies_idx) + .0001) # 16 is the greatest possible squared rating difference
-    op5 = (1 - op4)  * ((len(common_movies_idx) / smaller_vec) ** .05) # hard to say how important intersection over union is...
+    op5 = (1 - op4)  * ((len(common_movies_idx) / smaller_vec) ** args.i_factor) # hard to say how important intersection over union is...
     return op5
 
 
@@ -67,13 +80,13 @@ def unnormalized_spectral_clustering(ratings, args):
                 # leaves diagonals as 1 FIXME: should users be similar to themselves?
                 similarity_matrix[row, col] = sim_func(ratings[:, row], ratings[:, col])
                 similarity_matrix[col, row] = similarity_matrix[row, col]
-        with open('sim_mat.pkl', 'wb') as f:
+        with open('sim_mat' + str(args.sim_mat_num) + '.pkl', 'wb') as f:
             pickle.dump(similarity_matrix, f)
         print("Time taken to construct similarity matrix: {:.1f}".format(time.time() - t))
 
 
     else:
-        with open('sim_mat.pkl', 'rb') as f:
+        with open('sim_mat' + str(args.sim_mat_num) + '.pkl', 'rb') as f:
             similarity_matrix = pickle.load(f)
     
     # create similarity graph (sparse)
@@ -95,12 +108,10 @@ def unnormalized_spectral_clustering(ratings, args):
     np.linalg.cholesky(unnormalized_laplacian + np.eye(args.users_to_use)*.01) # test for positive semidefiniteness
 
     # find smallest NUM_EIGS eigenvalues of the unnormalized laplacian
-    #eigenvalues, eigenvectors = scipy.sparse.linalg.eigs(unnormalized_laplacian, k=NUM_EIGS, which='SM')
     eigenvalues, eigenvectors = np.linalg.eig(unnormalized_laplacian)
     smallest_idx = np.argsort(eigenvalues)[:NUM_EIGS]
     eigenvalues = eigenvalues[smallest_idx]
     eigenvectors = eigenvectors[:, smallest_idx]
-
     # create U, the matrix containing the eigenvectors as columns
     U = np.array(eigenvectors[:, 1:args.num_clusters+1])
     
@@ -117,16 +128,18 @@ def create_train_cluster2users_dict(train_clusters):
     return train_cluster2users_dict
 
 
-def predict_ratings(train_clusters, train_ratings_mat, val_users):
+def predict_ratings(train_clusters, train_ratings_mat, users):
     # set the predicted rating of a user for a particular movie to the average rating of 
     # the cluster of users that the user belongs to
     global FOUND_COUNT, NOTFOUND_COUNT
-    pred_val_ratings = defaultdict(list)
+    pred_ratings = defaultdict(list)
     train_cluster2users_dict = create_train_cluster2users_dict(train_clusters)
 
     for user in range(args.users_to_use):
-        movie_id_arr = np.array(val_users[user])[:,1]
-        for movie_id in movie_id_arr:
+        if not users[user]: # empty list
+            continue
+        movie_id_arr = np.array(np.array(users[user])[:,1], dtype=np.int32)
+        for i, movie_id in enumerate(movie_id_arr):
             peer_arr = train_cluster2users_dict[train_clusters[user]] # a peer is another in-cluster user
             peer_ratings = train_ratings_mat[movie_id, peer_arr]
             peer_ratings = peer_ratings[np.nonzero(peer_ratings)]
@@ -136,9 +149,10 @@ def predict_ratings(train_clusters, train_ratings_mat, val_users):
             else:
                 avg_peer_rating = np.sum(peer_ratings) / len(peer_ratings)
                 FOUND_COUNT += 1
-            pred_val_ratings[user].append(int(avg_peer_rating + .5))
-
-    return pred_val_ratings
+            users[user][i][2] = int(avg_peer_rating + .5)
+            pred_ratings[user].append(int(avg_peer_rating + .5))
+    
+    return pred_ratings, users
 
 
 def loss_func(pred_ratings, gt_ratings):
@@ -165,7 +179,7 @@ def train_val_split(all_users, all_ratings):
     
     for user in range(args.users_to_use):
         num_movies = len(all_users[user])
-        num_train_movies = int(num_movies * TRAIN_VAL_SPLIT)
+        num_train_movies = int(num_movies * TRAIN_VAL_SPLIT + .5)
         train_movie_idx = random.sample(range(num_movies), num_train_movies)
         train_mask = np.zeros(num_movies, dtype=np.int)
         train_mask[train_movie_idx] = 1
@@ -173,11 +187,15 @@ def train_val_split(all_users, all_ratings):
         val_mask[train_movie_idx] = 0
         train_users[user] = [all_users[user][i] for i in range(num_movies) if train_mask[i] == 1]
         val_users[user] = [all_users[user][i] for i in range(num_movies) if val_mask[i] == 1]
-
+        
+        if len(np.shape(np.array(train_users[user]))) != 2:
+            import pdb; pdb.set_trace()
         train_movie_idxs = np.array(train_users[user])[:,1]
         train_ratings_mat[train_movie_idxs, user] = all_ratings[train_movie_idxs, user]
-        val_movie_idxs = np.array(val_users[user])[:,1]
-        val_ratings_mat[val_movie_idxs, user] = all_ratings[val_movie_idxs, user]
+        val_movie_idxs = np.array(val_users[user])
+        if len(np.shape(np.array(val_users[user]))) == 2: # only relevant for single movie users
+            val_movie_idxs = np.array(val_users[user])[:,1]
+            val_ratings_mat[val_movie_idxs, user] = all_ratings[val_movie_idxs, user]
     
     return train_users, train_ratings_mat, val_users, val_ratings_mat
 
@@ -216,6 +234,8 @@ def inspect_similarity_graph(similarity_graph, all_users):
 def gt_ratings(users):
     gt_ratings = defaultdict(list)
     for user in range(args.users_to_use):
+        if not users[user]: # no movies associated with this user
+            continue
         gt_ratings[user] = np.array(users[user])[:, 2]
     return gt_ratings
 
@@ -243,8 +263,29 @@ if __name__ == '__main__':
     print([np.count_nonzero(train_clusters == i) for i in range(args.num_clusters)])
     #inspect_similarity_graph(similarity_graph, all_users)
 
-    pred_val_ratings = predict_ratings(train_clusters, train_ratings_mat, val_users)
-    loss, avg_error = loss_func(pred_val_ratings, gt_ratings(val_users))
-    print("Loss is {:.1f}, and avg error is {:.2f}".format(loss, avg_error))
-    print(FOUND_COUNT, NOTFOUND_COUNT)
-    pass
+    #pred_val_ratings, _  = predict_ratings(train_clusters, train_ratings_mat, val_users)
+    #loss, avg_error = loss_func(pred_val_ratings, gt_ratings(val_users))
+    #print("Loss is {:.1f}, and avg error is {:.2f}".format(loss, avg_error))
+    print("Now processing test data.")
+
+    test_users = defaultdict(list)
+    with open('./data/test.csv', 'r') as read_obj:
+        csv_reader = reader(read_obj)
+        for line_num, row in enumerate(csv_reader):
+            movie_id, user_id, rating, date = row
+            if user_id not in uhash: # this only happens once!
+                user_id = '4597' # some random user
+            test_users[uhash[user_id]].append([line_num, int(movie_id)-1, rating])
+
+    _, pred_test_ratings = predict_ratings(train_clusters, train_ratings_mat, test_users)
+    
+    output = np.zeros(250000)
+    for user, movie_entries in pred_test_ratings.items():
+        for entry in movie_entries:
+            output[entry[0]] = entry[2]
+
+    assert(np.all(np.array(output) != 0))
+
+    with open('output.txt', 'w') as write_obj:
+        for ranking in output:
+            write_obj.write(str(ranking))
