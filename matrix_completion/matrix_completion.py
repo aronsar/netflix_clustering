@@ -76,15 +76,6 @@ def train_val_split(all_users, all_ratings):
     return train_users, train_ratings_mat, val_users, val_ratings_mat
 
 
-def gt_ratings(users):
-    gt_ratings = defaultdict(list)
-    for user in range(NUM_USERS):
-        if not users[user]: # no movies associated with this user
-            continue
-        gt_ratings[user] = np.array(users[user])[:, 2]
-    return gt_ratings
-
-
 def avg_error_fn(val_ratings_mat, pred_ratings_mat):
     error = 0
     mask = val_ratings_mat > 0
